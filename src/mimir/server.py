@@ -12,7 +12,27 @@ from .store import MemoryStore, resolve_storage_dir
 
 mcp = FastMCP(
     "mimir",
-    instructions="Mimir is a local memory store for LLMs. Use it to persist context, code snippets, notes, and conversations across sessions. Store memories with labels for easy retrieval later.",
+    instructions=(
+        "Mimir is your persistent memory. Use it proactively — don't wait to be asked.\n\n"
+        "WHEN TO STORE:\n"
+        "- User states a preference, convention, or decision → mem_store with label 'preference' or 'decision'\n"
+        "- You learn a codebase pattern, architecture detail, or build command → mem_store with label 'codebase'\n"
+        "- A bug is found and fixed → mem_store with label 'bug-fix' so you don't repeat it\n"
+        "- A conversation produces an important outcome → mem_store with label 'outcome'\n"
+        "- User corrects you or clarifies how they want things done → mem_store with label 'correction'\n\n"
+        "WHEN TO SEARCH:\n"
+        "- At the start of every session → call mem_wake_up to load prior context\n"
+        "- Before answering questions about the project → mem_search for relevant memories\n"
+        "- Before making architectural decisions → mem_search for past decisions and preferences\n"
+        "- When the user references something from a past conversation → mem_search\n\n"
+        "WHEN TO USE THE KNOWLEDGE GRAPH:\n"
+        "- To track relationships: who works on what, which service depends on which, what tools are used where\n"
+        "- To record facts that may change over time (team assignments, project status, tech choices)\n"
+        "- To query the current state of the world: 'what is X working on?' → mem_kg_query\n\n"
+        "LABELS: Use consistent, lowercase, hyphenated labels. Prefer reusing existing labels (check mem_list_labels) over creating new ones.\n"
+        "DUPLICATES: Before storing, call mem_check_duplicate if the memory might already exist.\n"
+        "LINKING: When memories are related, use mem_link to connect them."
+    ),
 )
 
 _store: Optional[MemoryStore] = None
@@ -47,17 +67,30 @@ def mem_store(
     related_ids: Optional[list[str]] = None,
     expires_at: Optional[str] = None,
 ) -> str:
-    """Store a new memory. Use this to save context, code, notes, or conversations for later retrieval.
+    """Store a new memory for later retrieval across sessions.
+
+    Use when:
+    - The user states a preference, convention, or decision worth remembering
+    - You discover a codebase pattern, build command, or architecture detail
+    - A bug is diagnosed and fixed (store the root cause and solution)
+    - A conversation produces an important outcome or action item
+    - The user corrects you — store the correction to avoid repeating the mistake
+
+    Don't use when:
+    - The information is trivial or already stored (call mem_check_duplicate first)
+    - You're unsure if it's worth storing — err on the side of storing
 
     Args:
-        title: Short descriptive title for the memory (e.g. "Python FTS5 setup", "User preferences")
-        content: The full content to store - text, code, conversation transcript, etc.
-        content_type: Type of content: text, code, snippet, conversation, or note (default: text)
-        labels: List of tags for categorization (e.g. ["python", "database", "setup"])
-        source: Which tool created this memory (e.g. "vscode", "claude-code")
-        session_id: Session identifier to group related memories
-        related_ids: List of memory IDs this memory is related to
-        expires_at: ISO datetime when this memory should expire and be auto-purged (optional)
+        title: Short descriptive title (e.g. "User prefers tabs over spaces", "Fix: FTS5 tokenizer crash")
+        content: The full content — text, code, conversation transcript, error message, etc.
+        content_type: One of: text, code, snippet, conversation, note (default: text)
+        labels: Tags for categorization — use lowercase hyphenated labels (e.g. ["bug-fix", "python"]). Check mem_list_labels for existing labels before creating new ones.
+        source: Which tool created this (e.g. "vscode", "claude-code", "cursor")
+        session_id: Groups related memories within a session
+        related_ids: IDs of related memories to cross-reference
+        expires_at: ISO datetime when this memory auto-expires (e.g. for temporary workarounds)
+
+    Returns JSON: {status, id, title}
     """
     store = _get_store()
     memory = Memory(
@@ -95,21 +128,31 @@ def mem_search(
     limit: int = 20,
     offset: int = 0,
 ) -> str:
-    """Search stored memories using full-text search with optional filters.
+    """Search stored memories using full-text search with optional filters. Results are ranked by BM25 relevance when a query is provided.
 
-    When a query is provided, results are ranked by relevance (BM25).
-    Without a query, returns recent memories matching the filters.
+    Use when:
+    - The user asks about something that may have been discussed before
+    - You need to recall a past decision, preference, or codebase detail
+    - Before making an architectural choice — search for prior decisions
+    - Looking up a specific bug fix, workaround, or configuration
+    - Listing all memories with a particular label or from a session
+
+    Don't use when:
+    - You already have the memory ID — use mem_get instead
+    - You want a session-start overview — use mem_wake_up instead
 
     Args:
-        query: Full-text search query (searches titles, content, and labels)
-        labels: Filter by one or more labels (OR logic)
-        content_type: Filter by content type: text, code, snippet, conversation, or note
+        query: Full-text search query (searches titles, content, and labels). Supports natural language.
+        labels: Filter by one or more labels (OR logic — any label matches)
+        content_type: Filter by type: text, code, snippet, conversation, or note
         session_id: Filter by session ID
-        source: Filter by source tool
-        after: Only return memories created after this ISO datetime
-        before: Only return memories created before this ISO datetime
-        limit: Maximum results to return (1-100, default 20)
-        offset: Number of results to skip for pagination
+        source: Filter by source tool (e.g. "vscode")
+        after: Only memories created after this ISO datetime
+        before: Only memories created before this ISO datetime
+        limit: Max results (1-100, default 20)
+        offset: Skip N results for pagination
+
+    Returns JSON: {count, results: [{id, title, content, labels, rank, snippet, ...}]}
     """
     store = _get_store()
     ct = ContentType(content_type) if content_type else None
@@ -161,10 +204,19 @@ def mem_search(
     ),
 )
 def mem_get(memory_id: str) -> str:
-    """Get a specific memory by its ID.
+    """Retrieve a single memory by its exact ID.
+
+    Use when:
+    - You have a memory ID from a search result or link and need the full content
+    - Following up on a related_id reference from another memory
+
+    Don't use when:
+    - You're searching by keyword or topic — use mem_search instead
 
     Args:
-        memory_id: The unique ID of the memory to retrieve
+        memory_id: The UUID of the memory to retrieve
+
+    Returns JSON: {id, title, content, content_type, labels, related_ids, created_at, updated_at, ...} or {error} if not found
     """
     store = _get_store()
     memory = store.get(memory_id)
@@ -209,18 +261,30 @@ def mem_update(
     related_ids: Optional[list[str]] = None,
     expires_at: Optional[str] = None,
 ) -> str:
-    """Update an existing memory. Only provided fields are changed.
+    """Update an existing memory. Only the fields you provide are changed; others are left as-is.
+
+    Use when:
+    - A stored fact becomes outdated and needs correction
+    - Adding or changing labels on an existing memory
+    - Appending new information to existing content
+    - Setting or removing an expiration date
+
+    Don't use when:
+    - Creating a new memory — use mem_store instead
+    - The memory should be replaced entirely — consider mem_delete + mem_store
 
     Args:
-        memory_id: The unique ID of the memory to update
+        memory_id: The UUID of the memory to update
         title: New title (if changing)
         content: New content (if changing)
         content_type: New content type (if changing)
-        labels: New labels (replaces all existing labels)
+        labels: New labels — replaces ALL existing labels
         source: New source (if changing)
         session_id: New session ID (if changing)
-        related_ids: New related memory IDs (replaces all existing)
-        expires_at: New expiration datetime (ISO format)
+        related_ids: New related IDs — replaces ALL existing
+        expires_at: New expiration datetime (ISO format), or null to remove expiration
+
+    Returns JSON: {status, id, title} or {error} if not found
     """
     store = _get_store()
     kwargs: dict = {}
@@ -258,10 +322,20 @@ def mem_update(
     ),
 )
 def mem_delete(memory_id: str) -> str:
-    """Delete a memory by its ID.
+    """Permanently delete a memory by its ID.
+
+    Use when:
+    - A memory is incorrect, obsolete, or no longer relevant
+    - The user explicitly asks to forget something
+
+    Don't use when:
+    - The memory just needs updating — use mem_update instead
+    - You want to expire it automatically — set expires_at via mem_update
 
     Args:
-        memory_id: The unique ID of the memory to delete
+        memory_id: The UUID of the memory to delete
+
+    Returns JSON: {status, id} or {error} if not found
     """
     store = _get_store()
     deleted = store.delete(memory_id)
@@ -281,7 +355,15 @@ def mem_delete(memory_id: str) -> str:
     ),
 )
 def mem_list_labels() -> str:
-    """List all unique labels across all memories, with usage counts. Useful for discovering what categories of memories exist."""
+    """List all unique labels across all stored memories, with usage counts.
+
+    Use when:
+    - Before storing a memory — check existing labels to maintain consistency
+    - Getting an overview of what topics are in memory
+    - Deciding which label to filter by in mem_search
+
+    Returns JSON: {labels: [{label, count}]}
+    """
     store = _get_store()
     labels = store.list_labels()
     return json.dumps(
@@ -300,7 +382,15 @@ def mem_list_labels() -> str:
     ),
 )
 def mem_list_sessions() -> str:
-    """List all sessions with memory counts and time ranges. Sessions group related memories from a single interaction."""
+    """List all sessions with memory counts and time ranges.
+
+    Use when:
+    - Reviewing what happened in past sessions
+    - Finding which session_id to filter by in mem_search
+    - Understanding the timeline of interactions
+
+    Returns JSON: {sessions: [{session_id, memory_count, first_memory, last_memory}]}
+    """
     store = _get_store()
     sessions = store.list_sessions()
     return json.dumps(
@@ -329,11 +419,21 @@ def mem_list_sessions() -> str:
     ),
 )
 def mem_batch_store(memories: list[dict]) -> str:
-    """Store multiple memories at once in a single transaction. Efficient for bulk imports.
+    """Store multiple memories in a single atomic transaction.
+
+    Use when:
+    - Saving several related findings at once (e.g. after exploring a codebase)
+    - Importing memories from another source
+    - Storing multiple corrections or decisions from one conversation
+
+    Don't use when:
+    - Storing a single memory — use mem_store instead
 
     Args:
-        memories: List of memory objects, each with: title (required), content (required),
-                  and optional: content_type, labels, source, session_id
+        memories: List of memory dicts, each with: title (required), content (required),
+                  and optional: content_type, labels, source, session_id, related_ids, expires_at
+
+    Returns JSON: {status, count, ids}
     """
     store = _get_store()
     parsed = []
@@ -374,7 +474,15 @@ def mem_batch_store(memories: list[dict]) -> str:
     ),
 )
 def mem_stats() -> str:
-    """Get an overview of the memory store: total memories, breakdowns by type/source, label and session counts, date range, and storage size."""
+    """Get a statistical overview of the memory store.
+
+    Use when:
+    - Checking if the memory store has any data at all
+    - Understanding the size and shape of stored knowledge
+    - Debugging storage issues
+
+    Returns JSON: {total_memories, by_content_type, by_source, label_count, session_count, oldest_memory, newest_memory, storage_path, db_size_bytes}
+    """
     store = _get_store()
     s = store.stats()
     return json.dumps(
@@ -404,11 +512,20 @@ def mem_stats() -> str:
     ),
 )
 def mem_check_duplicate(title: str, content: str) -> str:
-    """Check if a similar memory already exists before storing. Returns whether a duplicate was found and the closest matches.
+    """Check if a similar memory already exists before storing a new one.
+
+    Use when:
+    - About to call mem_store but unsure if the information is already saved
+    - The server instructions say to check for duplicates
+
+    Don't use when:
+    - You're confident the memory is new (e.g. a unique bug fix or new decision)
 
     Args:
-        title: The title of the memory you plan to store
-        content: The content of the memory you plan to store
+        title: The title you plan to store
+        content: The content you plan to store
+
+    Returns JSON: {is_duplicate: bool, similar: [{id, title, rank, snippet}]}
     """
     store = _get_store()
     result = store.check_duplicate(title, content)
@@ -444,12 +561,22 @@ def mem_export(
     content_type: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> str:
-    """Export memories as JSON. Optionally filter by labels, content type, or session. Returns a JSON array of all matching memories.
+    """Export memories as a JSON array for backup or transfer.
+
+    Use when:
+    - Creating a backup of stored memories
+    - Migrating memories to another workspace or machine
+    - Reviewing all stored knowledge in bulk
+
+    Don't use when:
+    - Searching for specific memories — use mem_search instead
 
     Args:
         labels: Only export memories with these labels
         content_type: Only export memories of this type
         session_id: Only export memories from this session
+
+    Returns JSON: {count, memories: [...]}
     """
     store = _get_store()
     filters = None
@@ -473,10 +600,16 @@ def mem_export(
     ),
 )
 def mem_import(memories: list[dict]) -> str:
-    """Import memories from a JSON array. Skips any memories whose IDs already exist (safe to re-run).
+    """Import memories from a JSON array. Safe to re-run — skips memories whose IDs already exist.
+
+    Use when:
+    - Restoring from a backup created by mem_export
+    - Migrating memories from another workspace
 
     Args:
-        memories: List of memory objects to import. Each must have at minimum: id, title, content.
+        memories: List of memory dicts to import. Each must have at minimum: id, title, content.
+
+    Returns JSON: {status, imported_count}
     """
     store = _get_store()
     imported = store.import_memories(memories)
@@ -494,10 +627,21 @@ def mem_import(memories: list[dict]) -> str:
     ),
 )
 def mem_wake_up(max_tokens: int = 500) -> str:
-    """Load a compact summary of your memory context for session start. Returns a digest of topics, total memory count, and the most recent memories — designed to be injected into system context so the AI 'remembers' the user.
+    """Load a compact context summary to bootstrap a new session. Returns topic digest, memory count, and recent memories.
+
+    Use when:
+    - At the START of every new conversation or session — call this first
+    - Resuming work after a break to recall what was happening
+    - The user says "what do you remember?" or "what were we working on?"
+
+    Don't use when:
+    - You need to search for something specific — use mem_search instead
+    - You've already called this in the current session
 
     Args:
         max_tokens: Approximate token budget for the summary (default: 500)
+
+    Returns: Plain text context summary suitable for injecting into conversation
     """
     store = _get_store()
     context = store.wake_up(max_tokens=max_tokens)
@@ -517,9 +661,16 @@ def mem_wake_up(max_tokens: int = 500) -> str:
 def mem_link(memory_id: str, related_id: str) -> str:
     """Create a bidirectional link between two related memories.
 
+    Use when:
+    - Two memories cover the same topic from different angles
+    - A bug fix relates to an earlier decision or pattern
+    - A new memory extends or supersedes an older one
+
     Args:
         memory_id: ID of the first memory
         related_id: ID of the second memory to link to
+
+    Returns JSON: {status, memory_id, related_id, related_ids} or {error}
     """
     store = _get_store()
     result = store.link(memory_id, related_id)
@@ -546,7 +697,14 @@ def mem_link(memory_id: str, related_id: str) -> str:
     ),
 )
 def mem_purge_expired() -> str:
-    """Delete all memories whose expires_at timestamp is in the past. Returns the count of purged memories."""
+    """Delete all memories whose expires_at timestamp is in the past.
+
+    Use when:
+    - Periodically cleaning up temporary or time-limited memories
+    - Before exporting to remove stale data
+
+    Returns JSON: {status, deleted_count}
+    """
     store = _get_store()
     count = store.purge_expired()
     return json.dumps({"status": "purged", "deleted_count": count})
@@ -572,14 +730,25 @@ def mem_kg_add(
     valid_from: Optional[str] = None,
     source: str = "unknown",
 ) -> str:
-    """Add a fact (subject-predicate-object triple) to the knowledge graph. Facts have temporal validity and can be invalidated later.
+    """Add a fact (subject → predicate → object) to the knowledge graph. Facts are temporal — they can be invalidated when they stop being true.
+
+    Use when:
+    - Recording who works on what, which service uses which technology, what was decided
+    - Tracking relationships that may change over time (team assignments, project status)
+    - Building a queryable map of entities and their connections
+
+    Don't use when:
+    - Storing long-form notes or code — use mem_store instead
+    - The information is a one-off observation, not a structured relationship
 
     Args:
-        subject: The entity the fact is about (e.g. "Kai", "auth-service")
-        predicate: The relationship (e.g. "works_on", "decided_to_use", "assigned_to")
-        object: The target of the relationship (e.g. "Project Orion", "PostgreSQL")
+        subject: The entity (e.g. "Kai", "auth-service", "frontend")
+        predicate: The relationship (e.g. "works_on", "uses", "depends_on", "decided_to_use")
+        object: The target (e.g. "Project Orion", "PostgreSQL", "React 19")
         valid_from: When this fact became true (ISO datetime, defaults to now)
         source: Which tool created this fact
+
+    Returns JSON: {status, id, triple, valid_from}
     """
     store = _get_store()
     triple = KnowledgeTriple(
@@ -618,14 +787,25 @@ def mem_kg_query(
     as_of: Optional[str] = None,
     active_only: bool = True,
 ) -> str:
-    """Query the knowledge graph for facts. Filter by subject, predicate, object, or point-in-time.
+    """Query the knowledge graph for facts matching the given filters.
+
+    Use when:
+    - "What is X working on?" → query with subject=X
+    - "Who uses PostgreSQL?" → query with object="PostgreSQL"
+    - "What did the team look like last month?" → query with as_of
+    - Checking current relationships before adding new facts
+
+    Don't use when:
+    - Searching for long-form notes or code — use mem_search instead
 
     Args:
-        subject: Filter by subject entity
-        predicate: Filter by relationship type
-        object: Filter by object entity
-        as_of: Show facts as of this ISO datetime (for historical queries)
-        active_only: Only show currently valid facts (default: True)
+        subject: Filter by subject entity (exact match)
+        predicate: Filter by relationship type (exact match)
+        object: Filter by object entity (exact match)
+        as_of: Show facts that were true at this ISO datetime (point-in-time query)
+        active_only: Only show currently valid facts (default: True). Set False to include invalidated facts.
+
+    Returns JSON: {count, triples: [{id, subject, predicate, object, valid_from, valid_to, source}]}
     """
     store = _get_store()
     triples = store.kg_query(
@@ -671,13 +851,22 @@ def mem_kg_invalidate(
     object: str,
     ended: Optional[str] = None,
 ) -> str:
-    """Mark a fact as no longer true. The fact is kept for historical queries but won't appear in active results.
+    """Mark a knowledge graph fact as no longer true. The fact is preserved for historical queries but hidden from active results.
+
+    Use when:
+    - Someone changes teams, a project ends, a technology is replaced
+    - A previously recorded relationship is no longer accurate
+
+    Don't use when:
+    - The fact was entered in error — this marks it as historically true but now ended
 
     Args:
-        subject: The subject entity
-        predicate: The relationship
-        object: The object entity
-        ended: When the fact stopped being true (ISO datetime, defaults to now)
+        subject: The subject entity (must match exactly)
+        predicate: The relationship (must match exactly)
+        object: The object entity (must match exactly)
+        ended: When it stopped being true (ISO datetime, defaults to now)
+
+    Returns JSON: {status, count, triple} or {error} if no matching active triple
     """
     store = _get_store()
     count = store.kg_invalidate(subject, predicate, object, ended=ended)
@@ -703,10 +892,17 @@ def mem_kg_invalidate(
     ),
 )
 def mem_kg_timeline(entity: str) -> str:
-    """Get the chronological timeline of all facts involving an entity (as subject or object).
+    """Get a chronological timeline of all facts involving an entity — both as subject and object.
+
+    Use when:
+    - "What's the history of X?" — shows all relationships over time
+    - Reviewing how a person's role or a project's dependencies evolved
+    - Debugging why a relationship changed
 
     Args:
-        entity: The entity name to get the timeline for
+        entity: The entity name (checked against both subject and object fields)
+
+    Returns JSON: {entity, count, timeline: [{subject, predicate, object, valid_from, valid_to, status}]}
     """
     store = _get_store()
     triples = store.kg_timeline(entity)
@@ -741,7 +937,14 @@ def mem_kg_timeline(entity: str) -> str:
     ),
 )
 def mem_kg_stats() -> str:
-    """Get knowledge graph statistics: total triples, active triples, unique entities and predicates."""
+    """Get knowledge graph statistics.
+
+    Use when:
+    - Checking if the knowledge graph has any data
+    - Understanding the scope of recorded relationships
+
+    Returns JSON: {total_triples, active_triples, unique_subjects, unique_predicates, unique_objects}
+    """
     store = _get_store()
     s = store.kg_stats()
     return json.dumps(

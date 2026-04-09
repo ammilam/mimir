@@ -1,30 +1,24 @@
 # Mimir
 
-Local MCP server for persistent LLM memory. SQLite + FTS5 full-text search, stdio transport.
+Persistent memory for LLMs via MCP. SQLite + FTS5 full-text search, stdio transport.
 
-MCP clients (VS Code, Claude Code, Cursor, etc.) launch the server automatically — you never run it manually.
+Your MCP client launches the server automatically — you never run it manually.
 
-## Install
+## Quick Start
+
+### 1. Install
 
 ```bash
-# Install uv (if you don't have it)
-# Windows
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-# macOS/Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone and sync
-git clone <repo-url> mimir
-cd mimir
+curl -LsSf https://astral.sh/uv/install.sh | sh  # install uv
+git clone <repo-url> mimir && cd mimir
 uv sync
 ```
 
-## Client Configuration
+### 2. Register the MCP Server
 
-### VS Code / GitHub Copilot
+Add to your client's MCP config. Replace `/path/to/mimir` with wherever you cloned it.
 
-Add to `.vscode/mcp.json` in any workspace where you want memory available:
-
+**VS Code** — `.vscode/mcp.json` or your global MCP config:
 ```json
 {
   "servers": {
@@ -37,32 +31,12 @@ Add to `.vscode/mcp.json` in any workspace where you want memory available:
 }
 ```
 
-With workspace-local storage:
-
-```json
-{
-  "servers": {
-    "mimir": {
-      "type": "stdio",
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/mimir", "mimir", "--location=workspace"]
-    }
-  }
-}
-```
-
-Replace `/path/to/mimir` with the absolute path to where you cloned this repo.
-
-### Claude Code
-
+**Claude Code:**
 ```bash
 claude mcp add mimir -- uv run --directory /path/to/mimir mimir
 ```
 
-### Cursor
-
-Add to MCP settings (`Cursor Settings > MCP`):
-
+**Cursor** — `Cursor Settings > MCP`:
 ```json
 {
   "mcpServers": {
@@ -74,27 +48,91 @@ Add to MCP settings (`Cursor Settings > MCP`):
 }
 ```
 
-## Storage Modes
+### 3. Add Agent Instructions (Required)
 
-| Mode | Path | Use Case |
-|------|------|----------|
-| `global` (default) | `~/.mimir/memories/<workspace>/` | Shared across sessions, per-workspace isolation |
-| `workspace` | `<cwd>/.mimir/memories/` | Project-specific, lives with the repo |
+Registering the server only makes the tools *available*. The LLM won't use them unless you tell it to. Paste the following into your agent's instruction file:
 
-Pass `--location=workspace` to switch modes (see config examples above).
+```markdown
+## Memory (Mimir MCP)
+
+You have access to persistent memory via the Mimir MCP tools (prefixed `mem_`).
+Use these tools proactively — do NOT wait for the user to ask.
+
+### Session Start
+- Call `mem_wake_up` at the start of every conversation to load prior context.
+
+### When to Store (`mem_store`)
+- User states a preference, convention, or decision
+- You discover a codebase pattern, architecture detail, or build command
+- A bug is diagnosed and fixed — store the root cause and solution
+- A conversation produces an important outcome or action item
+- The user corrects you — store the correction so you don't repeat the mistake
+
+### When to Search (`mem_search`)
+- Before answering questions about the project or user preferences
+- Before making architectural or design decisions
+- When the user references something from a past conversation
+
+### Labels
+- Use lowercase, hyphenated labels (e.g. `bug-fix`, `preference`, `codebase`, `decision`)
+- Check `mem_list_labels` before creating new labels to stay consistent
+- Before storing, call `mem_check_duplicate` if the memory might already exist
+
+### Knowledge Graph
+- `mem_kg_add` — record relationships (who works on what, service dependencies)
+- `mem_kg_query` — answer "what is X?" or "who owns Y?"
+- `mem_kg_invalidate` — mark a fact as no longer true
+```
+
+Where to put it depends on your client:
+
+| Client | File | Scope |
+|--------|------|-------|
+| VS Code / Copilot | `.github/copilot-instructions.md` | per repo |
+| Claude Code | `CLAUDE.md` | per repo |
+| Claude Code | `~/.claude/CLAUDE.md` | global |
+| Cursor | `.cursor/rules/mimir.mdc` | per repo |
+| Cursor | `~/.cursor/rules/mimir.mdc` | global |
+
+See each client's docs for additional global instruction options.
+
+## Storage
+
+| Mode | Flag | Path |
+|------|------|------|
+| global *(default)* | — | `~/.mimir/memories/<workspace>/` |
+| workspace | `--location=workspace` | `.mimir/memories/` |
+
+To use workspace mode, append `"--location=workspace"` to the args array in your MCP config.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `mem_store` | Store a new memory |
-| `mem_search` | Full-text search with label, type, and date filters |
-| `mem_get` | Get a memory by ID |
-| `mem_update` | Update an existing memory |
+| **Core** | |
+| `mem_store` | Store a memory |
+| `mem_get` | Retrieve by ID |
+| `mem_update` | Update fields |
 | `mem_delete` | Delete a memory |
-| `mem_list_labels` | List all labels with counts |
-| `mem_list_sessions` | List all sessions |
-| `mem_batch_store` | Store multiple memories at once |
+| `mem_batch_store` | Store multiple in one transaction |
+| `mem_search` | Full-text search with BM25, label/type/date filters |
+| **Context** | |
+| `mem_wake_up` | Compact context summary — call at session start |
+| `mem_check_duplicate` | Check for similar memories before storing |
+| `mem_list_labels` | All labels with counts |
+| `mem_list_sessions` | All sessions with time ranges |
+| `mem_stats` | Totals, breakdowns, storage size |
+| **Organization** | |
+| `mem_link` | Bidirectional link between memories |
+| `mem_purge_expired` | Delete expired memories |
+| `mem_export` | Export as JSON |
+| `mem_import` | Import from JSON (idempotent) |
+| **Knowledge Graph** | |
+| `mem_kg_add` | Add a subject→predicate→object fact |
+| `mem_kg_query` | Query facts, with point-in-time support |
+| `mem_kg_invalidate` | Mark a fact as no longer true |
+| `mem_kg_timeline` | History of all facts about an entity |
+| `mem_kg_stats` | Triple/entity/predicate counts |
 
 ## Development
 
