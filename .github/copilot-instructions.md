@@ -1,3 +1,7 @@
+---
+description: Instructions for using the Mimir MCP memory tools in this workspace
+---
+
 ## Memory (Mimir MCP)
 
 You have access to persistent memory via the Mimir MCP tools (prefixed `mcp_mimir_`).
